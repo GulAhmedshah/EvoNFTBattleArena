@@ -1,0 +1,68 @@
+{
+  "files": [
+    {
+      "path": "package.json",
+      "content": "{\n  \"name\": \"nft-staking-platform\",\n  \"version\": \"0.1.0\",\n  \"description\": \"A production-ready NFT staking platform built with Hardhat and Solidity.\",\n  \"scripts\": {\n    \"compile\": \"hardhat compile\",\n    \"test\": \"hardhat test\",\n    \"test:staging\": \"hardhat test --network sepolia\",\n    \"coverage\": \"hardhat coverage\",\n    \"deploy:sepolia\": \"hardhat run scripts/deploy.js --network sepolia\",\n    \"lint\": \"solhint 'contracts/**/*.sol'\",\n    \"format\": \"prettier --write .\"\n  },\n  \"devDependencies\": {\n    \"@nomicfoundation/hardhat-toolbox\": \"^5.0.0\",\n    \"dotenv\": \"^16.4.5\",\n    \"hardhat\": \"^2.22.5\",\n    \"prettier\": \"^3.2.5\",\n    \"prettier-plugin-solidity\": \"^1.3.1\",\n    \"solhint\": \"^4.5.2\"\n  },\n  \"dependencies\": {\n    \"@openzeppelin/contracts\": \"^5.0.2\"\n  }\n}"
+    },
+    {
+      "path": "hardhat.config.js",
+      "content": "require(\"@nomicfoundation/hardhat-toolbox\");\nrequire(\"dotenv\").config();\n\nconst SEPOLIA_RPC_URL = process.env.SEPOLIA_RPC_URL || \"https://eth-sepolia.g.alchemy.com/v2/your-api-key\";\nconst PRIVATE_KEY = process.env.PRIVATE_KEY || \"0xkey\";\nconst ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY || \"your-etherscan-api-key\";\n\n/** @type import('hardhat/config').HardhatUserConfig */\nmodule.exports = {\n  solidity: {\n    version: \"0.8.19\",\n    settings: {\n      optimizer: {\n        enabled: true,\n        runs: 200,\n      },\n    },\n  },\n  defaultNetwork: \"hardhat\",\n  networks: {\n    hardhat: {\n      chainId: 31337,\n    },\n    sepolia: {\n      url: SEPOLIA_RPC_URL,\n      accounts: PRIVATE_KEY !== undefined ? [PRIVATE_KEY] : [],\n      chainId: 11155111,\n    },\n  },\n  etherscan: {\n    apiKey: {\n      sepolia: ETHERSCAN_API_KEY,\n    },\n  },\n  gasReporter: {\n    enabled: process.env.REPORT_GAS !== undefined,\n    currency: \"USD\",\n    outputFile: \"gas-report.txt\",\n    noColors: true,\n    coinmarketcap: process.env.COINMARKETCAP_API_KEY,\n  },\n  namedAccounts: {\n    deployer: {\n      default: 0,\n      1: 0,\n    },\n  },\n};\n"
+    },
+    {
+      "path": ".gitignore",
+      "content": "# Dependency directories\nnode_modules/\n\n# Environment variables\n.env\n\n# Build artifacts and cache\nartifacts/\ncache/\n\n# Coverage reports\ncoverage/\ncoverage.json\n\n# Gas reports\ngas-report.txt\n\n# Hardhat reports\nhh-report.log\n\n# IDE files\n.vscode/\n.idea/\n\n# OS generated files\n.DS_Store\n.DS_Store?\n._*\n.Spotlight-V100\n.Trashes\nehthumbs.db\nThumbs.db\n"
+    },
+    {
+      "path": "README.md",
+      "content": "# NFT Staking Platform\n\nThis project is a decentralized application (dApp) for staking Non-Fungible Tokens (NFTs) to earn rewards. It's built using modern Web3 technologies, focusing on security, gas efficiency, and best practices.\n\n## Project Overview\n\nThe platform consists of:\n- **Smart Contracts**: Written in Solidity, following OpenZeppelin standards for secure and robust on-chain logic.\n- **Backend/Scripts**: Hardhat environment for compiling, testing, and deploying contracts.\n- **Frontend**: (To be developed) A user-friendly interface for interacting with the staking platform.\n\n## Tech Stack\n\n- **Blockchain**: Ethereum (Sepolia Testnet, Mainnet)\n- **Smart Contracts**: Solidity ^0.8.19\n- **Development Framework**: Hardhat\n- **Libraries**: OpenZeppelin Contracts, Ethers.js, Chai\n\n## Getting Started\n\n### Prerequisites\n\n- [Node.js](https://nodejs.org/en/) (v18 or later)\n- [npm](https://www.npmjs.com/)\n- [Git](https://git-scm.com/)\n\n### Setup\n\n1.  **Clone the repository:**\n    bash\n    git clone <repository-url>\n    cd nft-staking-platform\n    \n\n2.  **Install dependencies:**\n    bash\n    npm install\n    \n\n3.  **Set up environment variables:**\n\n    Create a `.env` file in the root of the project by copying the example file:\n    bash\n    cp .env.example .env\n    \n\n    Populate the `.env` file with your own keys:\n    - `SEPOLIA_RPC_URL`: Your RPC URL from a node provider like [Alchemy](https://www.alchemy.com/) or [Infura](https://www.infura.io/).\n    - `PRIVATE_KEY`: The private key of the account you want to use for deployment. **IMPORTANT**: Do not commit this file.\n    - `ETHERSCAN_API_KEY`: Your Etherscan API key for contract verification.\n\n### Core Commands\n\n- **Compile Contracts**:\n  `npx hardhat compile`\n\n- **Run Tests**:\n  `npx hardhat test`\n\n- **Deploy to Sepolia Testnet**:\n  `npx hardhat run scripts/deploy.js --network sepolia`\n\n- **Code Formatting & Linting**:\n  `npm run format`\n  `npm run lint`\n"
+    },
+    {
+      "path": ".env.example",
+      "content": "# Sepolia Testnet Configuration\nSEPOLIA_RPC_URL=\"\"\nPRIVATE_KEY=\"\"\n\n# Etherscan API for contract verification\nETHERSCAN_API_KEY=\"\"\n\n# Optional: For gas reporting\nREPORT_GAS=true\nCOINMARKETCAP_API_KEY=\"\"\n"
+    },
+    {
+      "path": ".prettierrc",
+      "content": "{\n  \"tabWidth\": 2,\n  \"useTabs\": false,\n  \"semi\": true,\n  \"singleQuote\": false,\n  \"overrides\": [\n    {\n      \"files\": \"*.sol\",\n      \"options\": {\n        \"printWidth\": 120,\n        \"tabWidth\": 4,\n        \"useTabs\": false,\n        \"singleQuote\": false,\n        \"bracketSpacing\": false\n      }\n    }\n  ]\n}"
+    },
+    {
+      "path": "contracts/.gitkeep",
+      "content": ""
+    },
+    {
+      "path": "scripts/.gitkeep",
+      "content": ""
+    },
+    {
+      "path": "test/.gitkeep",
+      "content": ""
+    },
+    {
+      "path": "frontend/public/.gitkeep",
+      "content": ""
+    },
+    {
+      "path": "frontend/src/assets/.gitkeep",
+      "content": ""
+    },
+    {
+      "path": "frontend/src/components/.gitkeep",
+      "content": ""
+    },
+    {
+      "path": "frontend/src/contexts/.gitkeep",
+      "content": ""
+    },
+    {
+      "path": "frontend/src/hooks/.gitkeep",
+      "content": ""
+    },
+    {
+      "path": "frontend/src/pages/.gitkeep",
+      "content": ""
+    },
+    {
+      "path": "frontend/src/utils/.gitkeep",
+      "content": ""
+    }
+  ]
+}
