@@ -1,325 +1,401 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-import "@openzeppelin/contracts/token/ERC721/extensions/ERC721URIStorage.sol";
+import "@openzeppelin/contracts/token/ERC721/extensions/ERC721Enumerable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
-import "@openzeppelin/contracts/utils/Context.sol";
-import "@openzeppelin/contracts/utils/Counters.sol";
-// ERC4907 is the standard for rentable NFTs. It extends ERC721.
-import "https://github.com/OpenZeppelin/openzeppelin-contracts/blob/v4.9.0/contracts/token/ERC721/extensions/ERC4907.sol";
-
+import "@openzeppelin/contracts/security/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Strings.sol";
 
 /**
  * @title NFTStaking
  * @author Your Name
- * @notice An NFT contract with staking, battling, and renting capabilities.
- * This contract implements ERC4907 for NFT rentals, allowing owners to list their
- * NFTs for rent and renters to use them for a specified duration. It also includes
- * a locking mechanism to prevent transfers during sensitive operations like battles.
+ * @notice A comprehensive NFT staking platform with gamified elements like levels, battles, and evolutions.
+ * This contract manages NFT stats, battle history, levels, experience, and more.
  */
-contract NFTStaking is ERC4907, Ownable {
-    using Counters for Counters.Counter;
-    Counters.Counter private _tokenIdCounter;
+contract NFTStaking is ERC721Enumerable, Ownable, ReentrancyGuard {
+    using Strings for uint256;
 
-    // --- Enums ---
+    // --- CUSTOM ERRORS ---
+    error NFTNotOwned(address owner, uint256 tokenId);
+    error TokenIsLocked(uint256 tokenId);
+    error TokenOnCooldown(uint256 tokenId, uint256 cooldownRemaining);
+    error InvalidElement();
+    error BatchSizeTooLarge(uint256 size, uint256 max);
 
-    /**
-     * @dev Describes the current activity status of an NFT.
-     * An NFT's status determines if it can be transferred.
-     */
-    enum ActivityStatus {
-        None,
-        Training,
-        InBattle
-    }
-
-    // --- Mappings ---
+    // --- ENUMS & STRUCTS ---
 
     /**
-     * @dev Maps a tokenId to its current activity status.
-     * If status is not None, the NFT is considered locked.
+     * @dev Elemental types for NFTs, used in battle advantage calculations.
      */
-    mapping(uint256 => ActivityStatus) public activityStatus;
+    enum Element { NONE, FIRE, WATER, GRASS, LIGHT, DARK }
 
     /**
-     * @dev Maps a tokenId to its rental listing details.
+     * @dev Core statistics for each NFT.
      */
-    mapping(uint256 => RentalListing) public rentalListings;
-
-    /**
-     * @dev Maps a tokenId to its active rental information.
-     * This supplements ERC4907 by storing rental-specific financial and activity data.
-     */
-    mapping(uint256 => ActiveRental) public activeRentals;
-
-    /**
-     * @dev Maps an NFT owner's address to their total accumulated rental revenue.
-     */
-    mapping(address => uint256) public rentRevenue;
-
-    // --- Structs ---
-
-    /**
-     * @dev Stores information for an NFT listed for rent.
-     * @param dailyPrice The price in wei to rent the NFT for one day.
-     * @param minRentalDays The minimum number of days the NFT can be rented for.
-     * @param maxRentalDays The maximum number of days the NFT can be rented for.
-     * @param isListed Flag indicating if the NFT is currently listed for rent.
-     */
-    struct RentalListing {
-        uint256 dailyPrice;
-        uint16 minRentalDays;
-        uint16 maxRentalDays;
-        bool isListed;
-    }
-
-    /**
-     * @dev Stores information about an active rental.
-     * @param renter The address of the user renting the NFT.
-     * @param securityDeposit The amount held in escrow as a security deposit.
-     * @param expires The timestamp when the rental period ends.
-     * @param lastBattleTimestamp The timestamp of the renter's last battle with the NFT.
-     */
-    struct ActiveRental {
-        address renter;
-        uint256 securityDeposit;
-        uint256 expires;
+    struct NFTStats {
+        uint16 level;
+        uint256 experience;
+        uint32 wins;
+        uint32 losses;
+        Element element;
         uint256 lastBattleTimestamp;
+        uint8 evolutionStage;
     }
 
-    // --- Constants ---
-
-    /// @notice The cooldown period a renter must adhere to for battles.
-    uint256 public constant BATTLE_COOLDOWN_PERIOD = 24 hours;
-
-    // --- Events ---
-
-    event NFTLocked(uint256 indexed tokenId, ActivityStatus status);
-    event NFTUnlocked(uint256 indexed tokenId);
-    event EmergencyUnlock(uint256 indexed tokenId, address indexed owner);
-    event NFTListedForRent(uint256 indexed tokenId, address indexed owner, uint256 dailyPrice, uint16 minRentalDays, uint16 maxRentalDays);
-    event NFTDelisted(uint256 indexed tokenId);
-    event NFTRented(uint256 indexed tokenId, address indexed owner, address indexed renter, uint256 totalFee, uint256 expires);
-    event RentalSettled(uint256 indexed tokenId, address indexed renter, uint256 depositReturned, uint256 penaltyPaid);
-    event BattleActivityRecorded(uint256 indexed tokenId, address indexed renter);
-
-
-    // --- Constructor ---
+    /**
+     * @dev Information regarding the rental status of an NFT.
+     */
+    struct RentalInfo {
+        bool isRented;
+        address renter;
+        uint256 rentalEnds;
+    }
 
     /**
-     * @dev Initializes the contract, setting the name and symbol for the NFT collection.
+     * @dev A record of a single battle for an NFT.
      */
-    constructor() ERC721("NFTStakingHero", "NSH") ERC4907() {}
+    struct BattleRecord {
+        uint256 opponentTokenId;
+        bool won;
+        uint256 timestamp;
+    }
 
-    // --- Minting Function (for demonstration) ---
-    function safeMint(address to, string memory uri) public onlyOwner {
-        uint256 tokenId = _tokenIdCounter.current();
-        _tokenIdCounter.increment();
+    /**
+     * @dev Represents an NFT in the top leaderboard.
+     */
+    struct TopNFT {
+        uint256 tokenId;
+        uint256 battlePower;
+    }
+
+    // --- STATE VARIABLES ---
+    uint256 private _nextTokenId;
+    
+    // Mappings
+    mapping(uint256 => NFTStats) private _nftStats;
+    mapping(uint256 => RentalInfo) private _rentalInfo;
+    mapping(uint256 => BattleRecord[]) private _battleHistories;
+    mapping(uint256 => bool) private _isLocked; // General purpose lock for staking, battling etc.
+
+    // Constants
+    uint256 public constant BATTLE_COOLDOWN = 1 hours;
+    uint256 public constant MAX_BATCH_SIZE = 50;
+
+    // Leaderboard
+    TopNFT[10] private _topNFTs;
+
+    // --- EVENTS ---
+    event LevelUp(uint256 indexed tokenId, uint16 newLevel);
+    event BattleFinished(uint256 indexed winnerId, uint256 indexed loserId);
+    event ExperienceGained(uint256 indexed tokenId, uint256 xpGained);
+
+    // --- CONSTRUCTOR ---
+    constructor() ERC721("GameFi NFT", "GFN") {}
+
+    // --- MINTING (EXAMPLE) ---
+
+    /**
+     * @notice Mints a new NFT with specified element and assigns it to an owner.
+     * @dev Initializes stats for the new NFT. Only callable by the contract owner.
+     * @param to The address to receive the new NFT.
+     * @param element The element for the new NFT.
+     */
+    function mint(address to, Element element) public onlyOwner {
+        uint256 tokenId = _nextTokenId++;
         _safeMint(to, tokenId);
-        _setTokenURI(tokenId, uri);
+        _nftStats[tokenId] = NFTStats({
+            level: 1,
+            experience: 0,
+            wins: 0,
+            losses: 0,
+            element: element,
+            lastBattleTimestamp: 0,
+            evolutionStage: 1
+        });
     }
-    
-    // --- Core Hooks & Overrides ---
+
+    // --- VIEW FUNCTIONS ---
 
     /**
-     * @dev Hook that is called before any token transfer.
-     * Reverts if the token is locked (i.e., its activity status is not 'None').
+     * @notice Gets all core statistics for a given NFT.
+     * @param tokenId The ID of the NFT.
+     * @return A struct containing all stats of the NFT.
      */
-    function _beforeTokenTransfer(address from, address to, uint256 tokenId, uint256 batchSize) internal virtual override(ERC721, ERC4907) {
-        super._beforeTokenTransfer(from, to, tokenId, batchSize);
+    function getNFTStats(uint256 tokenId) external view returns (NFTStats memory) {
+        require(_exists(tokenId), "ERC721: invalid token ID");
+        return _nftStats[tokenId];
+    }
 
-        if (from != address(0) && activityStatus[tokenId] != ActivityStatus.None) {
-            revert("NFTStaking: Token is locked and cannot be transferred.");
+    /**
+     * @notice Retrieves the battle history for a specific NFT.
+     * @param tokenId The ID of the NFT.
+     * @return An array of BattleRecord structs.
+     */
+    function getBattleHistory(uint256 tokenId) external view returns (BattleRecord[] memory) {
+        require(_exists(tokenId), "ERC721: invalid token ID");
+        return _battleHistories[tokenId];
+    }
+
+    /**
+     * @notice Gets the current level of an NFT.
+     * @param tokenId The ID of the NFT.
+     * @return The current level.
+     */
+    function getNFTLevel(uint256 tokenId) external view returns (uint16) {
+        require(_exists(tokenId), "ERC721: invalid token ID");
+        return _nftStats[tokenId].level;
+    }
+
+    /**
+     * @notice Gets the NFT's current experience and the amount needed for the next level.
+     * @param tokenId The ID of the NFT.
+     * @return currentXp The experience the NFT currently has.
+     * @return xpForNextLevel The total experience required to reach the next level.
+     */
+    function getExperienceProgress(uint256 tokenId) external view returns (uint256 currentXp, uint256 xpForNextLevel) {
+        require(_exists(tokenId), "ERC721: invalid token ID");
+        NFTStats storage stats = _nftStats[tokenId];
+        return (stats.experience, _xpToNextLevel(stats.level));
+    }
+
+    /**
+     * @notice Calculates the battle power of an NFT based on its stats.
+     * @param tokenId The ID of the NFT.
+     * @return The calculated battle power.
+     */
+    function getBattlePower(uint256 tokenId) public view returns (uint256) {
+        require(_exists(tokenId), "ERC721: invalid token ID");
+        NFTStats storage stats = _nftStats[tokenId];
+        // Example formula: Each level adds 10 power, each win adds 1.
+        return (stats.level * 10) + stats.wins;
+    }
+
+    /**
+     * @notice Shows the NFT's progress towards its next evolution.
+     * @dev Example: Evolution occurs at level 15 and 30.
+     * @param tokenId The ID of the NFT.
+     * @return currentLevel The current level of the NFT.
+     * @return evolutionLevel The level required for the next evolution.
+     */
+    function getEvolutionProgress(uint256 tokenId) external view returns (uint16 currentLevel, uint16 evolutionLevel) {
+        require(_exists(tokenId), "ERC721: invalid token ID");
+        NFTStats storage stats = _nftStats[tokenId];
+        uint16 nextEvolutionLevel = 0;
+        if (stats.level < 15) {
+            nextEvolutionLevel = 15;
+        } else if (stats.level < 30) {
+            nextEvolutionLevel = 30;
         }
-    }
-
-    // --- Locking Mechanism ---
-
-    /**
-     * @notice Locks an NFT by setting its activity status, preventing transfers.
-     * @dev Can only be called by the NFT owner or current user (renter).
-     * @param tokenId The ID of the token to lock.
-     * @param status The activity status to set.
-     */
-    function lockNFT(uint256 tokenId, ActivityStatus status) public {
-        _requireIsOwnerOrUser(tokenId, _msgSender());
-        require(status != ActivityStatus.None, "NFTStaking: Cannot lock with 'None' status.");
-        require(activityStatus[tokenId] == ActivityStatus.None, "NFTStaking: Token is already locked.");
-
-        activityStatus[tokenId] = status;
-        emit NFTLocked(tokenId, status);
+        // If max evolution, returns 0 for evolutionLevel
+        return (stats.level, nextEvolutionLevel);
     }
 
     /**
-     * @notice Unlocks an NFT by resetting its activity status, allowing transfers.
-     * @dev Can only be called by the NFT owner or current user (renter).
-     * @param tokenId The ID of the token to unlock.
+     * @notice Retrieves the rental status of an NFT.
+     * @param tokenId The ID of the NFT.
+     * @return A struct containing the rental information.
      */
-    function unlockNFT(uint256 tokenId) public {
-        _requireIsOwnerOrUser(tokenId, _msgSender());
-        require(activityStatus[tokenId] != ActivityStatus.None, "NFTStaking: Token is not locked.");
-
-        activityStatus[tokenId] = ActivityStatus.None;
-        emit NFTUnlocked(tokenId);
+    function getRentalStatus(uint256 tokenId) external view returns (RentalInfo memory) {
+        require(_exists(tokenId), "ERC721: invalid token ID");
+        return _rentalInfo[tokenId];
     }
 
     /**
-     * @notice Allows an owner to forcibly unlock their NFT.
-     * @dev This is an emergency function. It cannot be used if the NFT is in an active battle.
-     * @param tokenId The ID of the token to unlock.
+     * @notice Calculates the elemental advantage multiplier.
+     * @param attacker The element of the attacking NFT.
+     * @param defender The element of the defending NFT.
+     * @return Multiplier (e.g., 200 for 2x, 100 for 1x, 50 for 0.5x).
      */
-    function emergencyUnlock(uint256 tokenId) external {
-        require(ownerOf(tokenId) == _msgSender(), "NFTStaking: Not the owner.");
-        require(activityStatus[tokenId] != ActivityStatus.None, "NFTStaking: Token is not locked.");
-        require(activityStatus[tokenId] != ActivityStatus.InBattle, "NFTStaking: Cannot unlock during a battle.");
+    function getElementAdvantage(Element attacker, Element defender) external pure returns (uint256) {
+        if (attacker == Element.NONE || defender == Element.NONE) return 100;
+        if (attacker == defender) return 100;
 
-        activityStatus[tokenId] = ActivityStatus.None;
-        emit EmergencyUnlock(tokenId, _msgSender());
+        if ((attacker == Element.FIRE && defender == Element.GRASS) ||
+            (attacker == Element.GRASS && defender == Element.WATER) ||
+            (attacker == Element.WATER && defender == Element.FIRE)) {
+            return 200; // Advantage
+        }
+
+        if ((attacker == Element.GRASS && defender == Element.FIRE) ||
+            (attacker == Element.WATER && defender == Element.GRASS) ||
+            (attacker == Element.FIRE && defender == Element.WATER)) {
+            return 50; // Disadvantage
+        }
+
+        if ((attacker == Element.LIGHT && defender == Element.DARK) ||
+            (attacker == Element.DARK && defender == Element.LIGHT)) {
+            return 200; // Mutual advantage
+        }
+
+        return 100; // Neutral
     }
 
-    // --- Rental System ---
+    // --- BATCH VIEW FUNCTIONS ---
 
     /**
-     * @notice Lists an NFT for rent.
-     * @dev Only the owner of the NFT can call this function.
-     * @param tokenId The ID of the token to list.
-     * @param dailyPrice The rental price per day in wei.
-     * @param minRentalDays The minimum rental duration in days.
-     * @param maxRentalDays The maximum rental duration in days.
+     * @notice Gets statistics for multiple NFTs in a single call.
+     * @param tokenIds An array of NFT IDs.
+     * @return An array of NFTStats structs.
      */
-    function listNFTForRent(uint256 tokenId, uint256 dailyPrice, uint16 minRentalDays, uint16 maxRentalDays) external {
-        require(ownerOf(tokenId) == _msgSender(), "NFTStaking: Not the owner.");
-        require(dailyPrice > 0, "NFTStaking: Daily price must be positive.");
-        require(minRentalDays > 0, "NFTStaking: Min rental days must be positive.");
-        require(maxRentalDays >= minRentalDays, "NFTStaking: Max days must be >= min days.");
-        require(activityStatus[tokenId] == ActivityStatus.None, "NFTStaking: Cannot list a locked NFT.");
-
-        rentalListings[tokenId] = RentalListing({
-            dailyPrice: dailyPrice,
-            minRentalDays: minRentalDays,
-            maxRentalDays: maxRentalDays,
-            isListed: true
-        });
-
-        emit NFTListedForRent(tokenId, _msgSender(), dailyPrice, minRentalDays, maxRentalDays);
-    }
-
-    /**
-     * @notice Removes an NFT from the rental market.
-     * @dev Only the owner can delist.
-     * @param tokenId The ID of the token to delist.
-     */
-    function delistNFTFromRent(uint256 tokenId) external {
-        require(ownerOf(tokenId) == _msgSender(), "NFTStaking: Not the owner.");
-        require(rentalListings[tokenId].isListed, "NFTStaking: NFT is not listed for rent.");
-
-        delete rentalListings[tokenId];
-        emit NFTDelisted(tokenId);
+    function getMultipleNFTStats(uint256[] calldata tokenIds) external view returns (NFTStats[] memory) {
+        if (tokenIds.length > MAX_BATCH_SIZE) revert BatchSizeTooLarge(tokenIds.length, MAX_BATCH_SIZE);
+        NFTStats[] memory allStats = new NFTStats[](tokenIds.length);
+        for (uint256 i = 0; i < tokenIds.length; i++) {
+            require(_exists(tokenIds[i]), "ERC721: invalid token ID");
+            allStats[i] = _nftStats[tokenIds[i]];
+        }
+        return allStats;
     }
 
     /**
-     * @notice Rents an NFT for a specified number of days.
-     * @dev The renter must send ETH equal to the total rental fee plus a security deposit (2x rental fee).
-     * @param tokenId The ID of the token to rent.
-     * @param rentalDays The number of days to rent the NFT.
+     * @notice Gets the top 10 NFTs ranked by battle power.
+     * @return An array of TopNFT structs, sorted highest to lowest power.
      */
-    function rentNFT(uint256 tokenId, uint256 rentalDays) external payable {
-        RentalListing storage listing = rentalListings[tokenId];
-        require(listing.isListed, "NFTStaking: NFT is not listed for rent.");
-        require(rentalDays >= listing.minRentalDays && rentalDays <= listing.maxRentalDays, "NFTStaking: Invalid rental duration.");
-
-        address owner = ownerOf(tokenId);
-        require(owner != _msgSender(), "NFTStaking: Owner cannot rent their own NFT.");
-
-        uint256 totalRentFee = listing.dailyPrice * rentalDays;
-        uint256 securityDeposit = totalRentFee * 2;
-        uint256 requiredPayment = totalRentFee + securityDeposit;
-
-        require(msg.value == requiredPayment, "NFTStaking: Incorrect payment amount sent.");
-
-        listing.isListed = false;
-
-        uint64 expires = uint64(block.timestamp + (rentalDays * 1 days));
-        _setUser(tokenId, _msgSender(), expires);
-
-        activeRentals[tokenId] = ActiveRental({
-            renter: _msgSender(),
-            securityDeposit: securityDeposit,
-            expires: expires,
-            lastBattleTimestamp: block.timestamp
-        });
-
-        rentRevenue[owner] += totalRentFee;
-
-        (bool success, ) = owner.call{value: totalRentFee}("");
-        require(success, "NFTStaking: Failed to send rent fee to owner.");
-
-        emit NFTRented(tokenId, owner, _msgSender(), totalRentFee, expires);
+    function getTopNFTs() external view returns (TopNFT[10] memory) {
+        return _topNFTs;
     }
-    
+
+    // --- UTILITY & INTERNAL FUNCTIONS ---
+
     /**
-     * @notice Settles a rental after it has expired to distribute the security deposit.
-     * @dev Can be called by anyone. Returns the deposit to the renter or gives it to the owner as penalty.
-     * @param tokenId The ID of the token whose rental is to be settled.
+     * @notice Internal function to transfer an NFT, with an additional check for a lock status.
+     * @dev This should be used internally instead of _safeTransfer when a lock is relevant.
+     *      Note: A more robust pattern is overriding _beforeTokenTransfer to enforce this on all transfers.
+     * @param from The current owner of the NFT.
+     * @param to The new owner.
+     * @param tokenId The ID of the NFT to transfer.
      */
-    function settleRental(uint256 tokenId) external {
-        ActiveRental storage rental = activeRentals[tokenId];
-        address renter = rental.renter;
-        
-        require(renter != address(0), "NFTStaking: No active rental for this token.");
-        require(block.timestamp > rental.expires, "NFTStaking: Rental period has not expired yet.");
+    function _safeTransferWithLockCheck(address from, address to, uint256 tokenId) internal {
+        if (_isLocked[tokenId]) revert TokenIsLocked(tokenId);
+        _safeTransfer(from, to, tokenId, "");
+    }
 
-        uint256 deposit = rental.securityDeposit;
-        uint256 penalty = 0;
-        address owner = ownerOf(tokenId);
-
-        if (block.timestamp > rental.lastBattleTimestamp + BATTLE_COOLDOWN_PERIOD) {
-            penalty = deposit;
-            rentRevenue[owner] += penalty;
-            (bool success, ) = owner.call{value: deposit}("");
-            require(success, "NFTStaking: Failed to send penalty to owner.");
+    /**
+     * @notice Updates the win/loss record for a token and records the battle.
+     * @param tokenId The ID of the token being updated.
+     * @param opponentTokenId The ID of the opponent token.
+     * @param won A boolean indicating if the battle was won.
+     */
+    function _updateBattleStats(uint256 tokenId, uint256 opponentTokenId, bool won) internal {
+        NFTStats storage stats = _nftStats[tokenId];
+        stats.lastBattleTimestamp = block.timestamp;
+        if (won) {
+            stats.wins++;
         } else {
-            (bool success, ) = renter.call{value: deposit}("");
-            require(success, "NFTStaking: Failed to return deposit to renter.");
+            stats.losses++;
+        }
+        _battleHistories[tokenId].push(BattleRecord({
+            opponentTokenId: opponentTokenId,
+            won: won,
+            timestamp: block.timestamp
+        }));
+        // Does not emit event here, assumed to be part of a larger battle function
+    }
+
+    /**
+     * @notice Applies experience to an NFT and handles level-ups.
+     * @param tokenId The ID of the NFT receiving experience.
+     * @param xpGained The amount of experience gained.
+     */
+    function _applyExperience(uint256 tokenId, uint256 xpGained) internal {
+        NFTStats storage stats = _nftStats[tokenId];
+        stats.experience += xpGained;
+        emit ExperienceGained(tokenId, xpGained);
+
+        uint256 requiredXp = _xpToNextLevel(stats.level);
+        while (stats.experience >= requiredXp) {
+            stats.level++;
+            stats.experience -= requiredXp;
+            emit LevelUp(tokenId, stats.level);
+            requiredXp = _xpToNextLevel(stats.level);
+        }
+        // After stats change, update its position in the leaderboard
+        _updateTopNFTs(tokenId);
+    }
+
+    /**
+     * @notice Checks if an NFT is on battle cooldown.
+     * @dev Reverts if the NFT is still on cooldown.
+     * @param tokenId The ID of the NFT to check.
+     */
+    function _checkCooldown(uint256 tokenId) internal view {
+        uint256 lastBattle = _nftStats[tokenId].lastBattleTimestamp;
+        if (lastBattle > 0) {
+            uint256 cooldownEnd = lastBattle + BATTLE_COOLDOWN;
+            if (block.timestamp < cooldownEnd) {
+                revert TokenOnCooldown(tokenId, cooldownEnd - block.timestamp);
+            }
+        }
+    }
+
+    // --- PRIVATE HELPER FUNCTIONS ---
+
+    /**
+     * @dev Calculates the experience needed to advance from a given level.
+     * @param level The current level.
+     * @return The total experience points required for the next level.
+     */
+    function _xpToNextLevel(uint16 level) private pure returns (uint256) {
+        // A simple curve: (level + 1) * 100
+        return (uint256(level) + 1) * 100;
+    }
+
+    /**
+     * @dev Updates the top 10 leaderboard if the given token qualifies.
+     * @param tokenId The ID of the token whose power may have changed.
+     */
+    function _updateTopNFTs(uint256 tokenId) private {
+        uint256 newPower = getBattlePower(tokenId);
+        uint256 lowestTopPower = _topNFTs[9].battlePower;
+        
+        // Exit early if power is not high enough, unless the token is already in the list
+        int256 listIndex = -1;
+        for (uint8 i = 0; i < 10; i++) {
+            if (_topNFTs[i].tokenId == tokenId) {
+                listIndex = int256(i);
+                break;
+            }
         }
 
-        delete activeRentals[tokenId];
-        delete rentalListings[tokenId];
+        if (newPower <= lowestTopPower && listIndex == -1) {
+            return; // Not powerful enough to make the list
+        }
 
-        emit RentalSettled(tokenId, renter, deposit - penalty, penalty);
-    }
-
-    // --- Renter Actions & Penalties ---
-
-    /**
-     * @notice A function for the renter to record battle activity and reset the penalty cooldown.
-     * @dev This function would typically be called within a `battle()` function.
-     * @param tokenId The ID of the token used in battle.
-     */
-    function recordBattleActivity(uint256 tokenId) external {
-        require(userOf(tokenId) == _msgSender(), "NFTStaking: You are not the current renter.");
-        require(activityStatus[tokenId] == ActivityStatus.InBattle, "NFTStaking: Must be in battle to record activity.");
+        // Remove the old entry if it exists
+        if (listIndex != -1) {
+            for (uint256 i = uint256(listIndex); i < 9; i++) {
+                _topNFTs[i] = _topNFTs[i+1];
+            }
+            _topNFTs[9] = TopNFT(0, 0);
+        }
         
-        activeRentals[tokenId].lastBattleTimestamp = block.timestamp;
+        // Insert new entry at the bottom
+        _topNFTs[9] = TopNFT(tokenId, newPower);
 
-        emit BattleActivityRecorded(tokenId, _msgSender());
+        // Bubble it up to the correct sorted position
+        for (uint256 i = 9; i > 0; i--) {
+            if (_topNFTs[i].battlePower > _topNFTs[i-1].battlePower) {
+                TopNFT memory temp = _topNFTs[i-1];
+                _topNFTs[i-1] = _topNFTs[i];
+                _topNFTs[i] = temp;
+            } else {
+                // In correct position
+                break;
+            }
+        }
     }
 
-    // --- Helper & View Functions ---
-
     /**
-     * @dev Checks if an address is the owner or the current user (renter) of a token.
+     * @dev Overridden to ensure lock status is checked before any transfer.
      */
-    function _requireIsOwnerOrUser(uint256 tokenId, address spender) internal view {
-        require(ownerOf(tokenId) == spender || userOf(tokenId) == spender, "NFTStaking: Caller is not owner or user.");
-    }
-    
-    /**
-     * @notice A placeholder function to demonstrate how evolving would be restricted to the owner.
-     * @param tokenId The ID of the token to evolve.
-     */
-    function evolve(uint256 tokenId) external {
-        require(ownerOf(tokenId) == _msgSender(), "NFTStaking: Only the owner can evolve the NFT.");
-        // ... evolution logic here ...
+    function _beforeTokenTransfer(address from, address to, uint256 tokenId, uint256 batchSize)
+        internal
+        virtual
+        override(ERC721, ERC721Enumerable)
+    {
+        super._beforeTokenTransfer(from, to, tokenId, batchSize);
+        if (from != address(0)) { // Not a mint transfer
+            if (_isLocked[tokenId]) revert TokenIsLocked(tokenId);
+        }
     }
 }
